@@ -1,0 +1,104 @@
+---
+title: "testing"
+output: html_document
+date: "2024-03-11"
+---
+
+```{r}
+library(readxl)
+banks <- read_excel("C:/Users/Ryan Goh/Desktop/ACCT420PROJ/data/Bank_Data_2000-2023.xlsx")
+
+#READ the aaer file
+AAER <- read_excel("C:/Users/Ryan Goh/Desktop/ACCT420PROJ/data/AAER_WITH_ISIN.xlsx")
+
+#load the cat1 ratios dataset
+cat1 <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/cat1_ratios.csv')
+
+#load the leverage ratios
+leverage <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/leverage_ratios.csv')
+
+#load the NSF ratios
+NSFR <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/NSFR_ratios.csv')
+```
+
+
+#this segment will focus on joining the aaer with banks
+#method2: use aaer
+#LEFT join aaer on ISIN and year
+```{r}
+library(tidyverse)
+#subset the data first
+#FILTER for only US companies
+#why? because AAER only applies to the US
+aaer1 <- AAER %>%
+  mutate(year = VIOLATION_START_YEAR)%>%
+  select(isin,year,VIOLATION_START_YEAR) 
+
+#rename ITEM6008 column in banks to isin
+#filter nation code == 840 for US banks or US entities only
+banks3 <- banks %>%
+  filter(ITEM6027 == 840) %>%
+  rename(isin = ITEM6008, year = year_)
+
+#left join both df
+banks_final <- inner_join(aaer1,banks3, by = c("isin","year"))
+banks_final
+
+
+```
+
+#this is the dataset containing all of the banks who have been caught in aaer and the year
+```{r}
+banks_final1 <- banks_final %>%
+  #remove duplicate rows
+  distinct() %>%
+  select(year,ITEM6001, isin,VIOLATION_START_YEAR) 
+
+banks_final1
+
+```
+
+
+#create a new field called AAER
+#LEFT join with banks3 again
+#banks3 is our final dataset for AAER  as a y variable
+
+```{r}
+banks3 <- left_join(banks3,banks_final1, by = c("ITEM6001","year")) %>%
+  mutate(AAER = factor(ifelse(!is.na(VIOLATION_START_YEAR),1,0)))
+
+
+banks3
+```
+
+
+
+
+#take a look at number of fraud cases per year based on aaer
+```{r}
+#show total number of fraud cases per year for banks
+aaer_per_year <- banks3 %>%
+  filter(ITEM6010 == 4) %>%
+  group_by(year) %>%
+  mutate(total_fraud_cases = sum(AAER == 1), total_observations = n()) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(year, total_fraud_cases, total_observations)
+
+aaer_per_year
+
+```
+
+#save the dataset as an rds file
+```{r}
+
+saveRDS(banks3, file = "banks_final_aaer.rds")
+
+```
+
+#load rds
+```{r}
+df <- readRDS('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/data/banks_final_aaer.rds')
+
+```
+

@@ -1,0 +1,1084 @@
+---
+title: 'ACCT420 Forecasting and Forensic Analytics (FFA)'
+subtitle: 'Transparently.AI Group Project'
+author: 'Group 2'
+toc: true
+output:
+  html_document:
+  theme: united
+highlight: default
+toc_float:
+  collapsed: false
+self_contained: false
+execute:
+  echo: true
+warning: false
+message: false
+editor: source
+markdown: 
+wrap: "none"
+date: "2024-04-06"
+---
+
+# 1.0 Data Preparation
+
+Do note that the final data set `banks_cleaned_with_aaer.rds` has undergone pre-processing steps. You can find these scripts under the `data_wrangling_scripts`folder, which contains 2 different scripts:
+
+1.  `join_AAER_banks.Rmd`: This script joins the AAER data with the banks data and cleans the NA/INF/NAN values.
+2.  `join_items_banks_aaer.Rmd`: This script joins the AAER_banks data with additional variables extracted from Wharton DB. It also cleans the NA/INF/NAN values.
+
+## 1.1. Loading Libraries
+
+```{r, message = F, warning = F, error = F}
+
+library(tidyverse)
+library(e1071)
+library(rlang)
+library(glmnet)
+library(yardstick)
+library(pROC)
+library(ggplot2)
+library(recipes)
+library(parsnip)
+library(glmnet)
+library(coefplot)
+library(caret)
+library(xgboost)
+library(DataExplorer)
+
+```
+
+## 1.2 Loading Data
+
+```{r}
+#u may need to change the directory
+banks <- readRDS("C:/Users/Ryan Goh/Desktop/FFA-13 PROJECT GROUP2/finalised_data/banks_cleaned_with_aaer.rds")
+banks
+```
+
+### 1.2.1 Exploratory Data Analysis
+
+```{r, eval = T, fig.height=5}
+banks %>% introduce()
+
+banks %>% plot_missing() 
+
+banks %>% profile_missing() 
+
+banks %>% plot_bar()
+
+banks %>% plot_intro()
+
+banks %>% plot_density()
+
+banks %>% plot_histogram()
+
+```
+
+*Observations*:
+
+1.  There are no missing values as they have already been replaced by either the group column mean or absolute mean or removed in the case of infinite values.
+2.  The vast majority of our variables are continuous.
+3.  The density plot of the majority of our variables are right or left skewed, hence we need to normalise them.
+
+### 1.2.2 Correlation Matrix
+
+```{r}
+
+cor(banks[sapply(banks,is.numeric)])
+
+```
+
+*Observations*:
+
+Instances where correlation \> 0.80:
+
+1.  ITEM3998 (Total Capital) & ITEM3255 (Total Debt)
+2.  ITEM8361 (Operating Income Return on Total Capital) & ITEM8301 (Return on Equity - Total (%)
+3.  ITEM18156 (Risk Weighted Assets) & ITEM3995 (Total Shareholders Equity)
+
+To prevent multicollinearity, we excluded these pairings from our logistic models.
+
+## 1.3 Data Pre-Processing
+
+### 1.3.1 Log Numeric Variables
+
+```{r cars}
+
+# First, we re-scaled some variables for better readability and also calculated the total net_profit_margin for the year.
+
+banks <- banks %>%
+  mutate(net_profit_margin = (ITEM19109+ITEM19110+ITEM19111+ITEM19112)/1000000,
+         ITEM7240 = ITEM7240/1000000,
+         ITEM3255 = ITEM3255/1000000,
+         ITEM3999 = ITEM3999/1000000,
+         ITEM18156 = ITEM18156/1000000,
+         ITEM3995 = ITEM3995/1000000,
+         ITEM2004 = ITEM2004/1000000,
+         ITEM3019 = ITEM3019/1000000,
+         ITEM3998 = ITEM3998/1000000)
+
+# Remove Items 19109-19112
+banks <- subset(banks, select = -c(ITEM19109,ITEM19110,ITEM19111,ITEM19112,cash_to_deposits_ratio,code,ITEM6001,ITEM6010))
+banks
+
+```
+
+### 1.3.2 Removing rows with Infinite Values
+
+```{r}
+
+# Check the 5 rows with infinite values
+banks[rowSums(sapply(banks, is.infinite)) > 0, ]
+
+# Remove the rows with infinite values
+banks <- banks[!is.infinite(banks$leverage_ratio),]
+banks
+
+```
+
+### 1.3.3 Checking Skewness of Variables & Log to normalise it if the skewness is \>1
+
+```{r}
+
+# Get names of all numeric columns
+numeric_columns <- names(banks)[sapply(banks, is.numeric)][-1]
+
+check_and_log_transform <- function(data, skew_threshold) {
+  #Get the column names of all numeric columns
+  numeric_columns <- names(data)[sapply(data, is.numeric)][-1]
+  #Create a copy of the data
+  transformed_data <- data
+  for (col in numeric_columns) {
+          skew = skewness(data[[col]], type = 2)
+          
+          if (abs(skew) > skew_threshold) {
+             transformed_data[[col]] <- log(data[[col]])
+      }
+    }
+  return(transformed_data)
+  }
+
+```
+
+### 1.3.4 Run Skewness Check & Log function on the dataset
+
+```{r}
+
+banks <- check_and_log_transform(banks,1)
+banks
+
+```
+
+### 1.3.5 Replacing all remaining NA values with the Absolute Mean
+
+```{r}
+
+# Replace the NA values of hrswork with the mean of the remaining values
+for (col in numeric_columns) {
+  banks[[col]][is.na(banks[[col]])] <- round(mean(banks[[col]], na.rm = TRUE)) 
+}
+
+# See the results
+banks
+
+```
+
+### 1.3.6 Removing all Infinite Values after the log transformation
+
+```{r}
+
+for (col in numeric_columns){
+   banks <- banks[!is.infinite(banks[[col]]),]
+}
+banks 
+
+```
+
+*Observations*:
+
+After using log transformation to remove all infinite values, it left us with 19,330 rows.
+
+### 1.3.7 Plot the Density and Histograms to see if our skew has been rectified
+
+```{r, eval = T, fig.height=5}
+
+banks %>% plot_density()
+
+banks %>% plot_histogram()
+
+```
+
+*Observations*:
+
+The skewness of the graph has been rectified, as evidenced by the graphs now exhibiting a more normal distribution.
+
+### 1.3.8 Define the train test split
+
+```{r}
+
+# Use a 70/30 train test split
+set.seed(1234)
+train <- sample (1:nrow(banks), 13531)
+test <- -train
+banks.train <- banks[train,]
+banks.test <- banks[test,]
+
+```
+
+*Comments*:
+
+We chose to use a normal train test split instead of a time-based one because it offers a more representative sample of the data especially in the case of bank fraud detection. When it comes to fraud identification, fraudulent activity patterns and traits might change over time as well. As a result, the complexity and diversity of fraudulent activity may not be sufficiently captured by a time-based split, in which data is separated into training and testing sets according to chronological sequence.
+
+### 1.3.9 Checking the number of AAERs
+
+```{r, fig.height=5}
+
+# Show total number of fraud cases per year for banks
+total_aaer <- banks %>%
+  mutate(total_fraud_cases = sum(AAER == 1), total_observations = n()) %>%
+  dplyr::slice(1) %>%
+  select(total_fraud_cases, total_observations)
+
+total_aaer #362
+
+# Visualisations of number of AAERs - 1 & 0
+banks_AAER_visualisation <- banks %>%
+    count(AAER) %>%
+  mutate(AAER = fct_reorder(AAER, desc(n))) %>%
+  ggplot(mapping = aes(x = AAER, y = n)) +
+  geom_col(aes(fill = AAER), show.legend = FALSE, alpha = 0.7) +
+  geom_text(aes(label = n, y = n + 200)) 
+
+print(banks_AAER_visualisation)  # AAER = 0 (18,968); AAER = 1 (362)
+
+# Run the cell below first
+# Total AAER in Train
+total_aaer_train <- banks.train %>%
+  mutate(total_fraud_cases = sum(AAER == 1), total_observations = n()) %>%
+  dplyr::slice(1) %>%
+  select(total_fraud_cases, total_observations)
+
+total_aaer_train #241 
+
+# Total AAER in Test
+total_aaer_test <- banks.test %>%
+  mutate(total_fraud_cases = sum(AAER == 1), total_observations = n()) %>%
+  dplyr::slice(1) %>%
+  select(total_fraud_cases, total_observations)
+
+total_aaer_test #121 
+
+```
+
+*Observations*:
+
+A total of 362 fraud cases have been observed with 241 in the training set and 121 in the test set.
+
+# 2.0 Model Building
+
+## 2.1 XGBoost Model
+
+### 2.1.1 Tuning the XGBoost model with parameter grid
+
+```{r, warning = F, error = F}
+
+# We have 1 independent and 29 predictor variables.
+
+# nrounds: number of trees used. Too many trees may cause overfitting
+
+# The max depth of our tree cannot exceed 29. This is because too high of a max depth may cause the trees to memorise the data instead of generating meaningful patterns.
+
+# learning rate(eta): controls step size at each iteration. Smaller step means better convergence but more computing power is needed. We set the max eta threshold at 0.5 because beyond 0.5 the step size might be too big and the model may not catch the finer details and intricacies in the data. 
+
+# min_child_weight: min sum of instance weight required to split a node. Setting a higher value for min_child_weight prevents the algorithm from creating child nodes that have fewer instances. This can help control over-fitting by preventing the algorithm from splitting nodes with very few instances, which may lead to overly complex models that memorise noise in the data. Setting a lower value on the other hand can help the model capture the finer details and patterns in the data.
+
+# colsample_bytree: random fraction of columns to be sub sampled. Number of columns determines how many nodes are in each tree. This takes the value from 0 to 1.
+
+# subsample: fraction of the training samples (randomly selected) that will be used to train each tree. Just like our train test split, we set this to 0.70.
+
+# gamma: regularisation parameter to control complexity of trees. This specifies the minimum reduction in the loss function required to make a further partition on a leaf node of the tree. If the loss reduction is achieved by splitting a leaf node is less than gamma, the node will not be split, and the tree growing process will stop for that branch. Hence, we set the default to 10 to prevent over-fitting.
+
+set.seed(1234)
+
+# Let's first define our grid
+# Define hyper-parameter grid
+grid <- expand.grid(
+  nrounds = c(50, 100, 150, 200),
+  max_depth = c(5, 10, 15, 25),
+  eta = c(0.01, 0.1, 0.3, 0.5),
+  gamma = 10,
+  min_child_weight = 5,
+  colsample_bytree = 0.3,
+  subsample = 0.70 # same as our train test split
+)
+
+# Specify the training control
+xgb_trcontrol <- trainControl(
+  method="cv",
+  number = 10 # Let's use 10 folds cross validation
+)
+
+# Convert the categorical variables to numeric, this is because matrixes cannot process non-numeric values
+banks.train3 <- banks.train %>%
+  mutate(big4_auditor = as.numeric(big4_auditor),
+         ITEM7546 = as.numeric(ITEM7546))
+
+
+# Perform grid search
+xgb_train_1 <- train(
+ x = as.matrix(banks.train3  %>% select(-c(AAER, year))),
+ y = banks.train3$AAER,
+ trControl = xgb_trcontrol,
+ tuneGrid = grid,
+ method="xgbTree",
+ objective= "binary:logistic",
+ eval_metric='auc'
+)
+
+# View the best parameters
+xgb_train_1$bestTune
+
+# Our optimal parameters are:
+## nrounds= 50
+## max_depth = 15
+## eta = 0.5
+## gamma = 10
+## colsample_bytree = 0.3
+## min_child_weight = 5
+## subsample = 0.7
+
+```
+
+*Observations*:
+
+1.  The following are the optimal parameters we have obtained:
+
+nrounds= 50
+
+max_depth = 15
+
+eta = 0.5
+
+gamma = 10
+
+colsample_bytree = 0.3
+
+min_child_weight = 5
+
+subsample = 0.7
+
+2.  One thing to note is that the optimal parameters may change based on the R version and operating system as tested by our group.
+
+### 2.1.2 Running the XGBoost model with optimal parameters
+
+```{r,warning = F, error = F}
+
+set.seed(1234)
+
+# Define the x and y for train and test sets
+banks.test3 <- banks.test %>%
+  mutate(big4_auditor = as.numeric(big4_auditor),
+         ITEM7546 = as.numeric(ITEM7546))
+
+banks.train3_x <- as.matrix(banks.train3  %>% select(-c(AAER, year)))
+banks.train3_y <- as.matrix(banks.train3 %>%
+  mutate(AAER = as.numeric(AAER) - 1) %>%
+  select(AAER))
+
+banks.test3_x <- as.matrix(banks.test3  %>% select(-c(AAER, year)))
+banks.test3_y <- as.matrix(banks.test3 %>%
+  mutate(AAER = as.numeric(AAER) - 1) %>%
+  select(AAER))
+
+# Why do we need to -1 for the y?
+## Because when we convert to numeric factors 0 and 1 become 1 and 2.
+
+# Specify the optimal params
+params <- list(max_depth = 15,
+               eta = 0.5,
+               gamma = 10,
+               min_child_weight = 5,
+               colsample_bytree = 0.3,
+               subsample = 0.7,
+               objective= "binary:logistic")
+
+# Build the model using xgboost not xgb.cv
+xgb1 <- xgboost(params = params,
+                data = banks.train3_x,
+                label = banks.train3_y,
+                nrounds = 50,
+                eval_metric = 'auc',
+                nfold = 10, #10 folds cv
+                stratified = TRUE #use stratified sampling
+                )
+
+# precision: ratio of true positives to total predicted positives
+# recall: ratio of true negative to total predicted negatives
+# true positives(tp) / sensitivity : tp/tp+fn
+# true negatives(tn) / specificity : tn/tn+fp
+
+```
+
+*Observations*:
+
+1.  We obtained a train AUC above 0.95.
+2.  This result is suspicious and could indicate that our model has over-fitted to the training data.One limitation would be that AAER displayed an imbalanced data (in favour of the "0" prediction), high recall, and low precision. That is, you're predicting most of the ones at the higher end of your prediction probabilities, but most of the outcomes at the higher end of your prediction probabilities are still zero. In short, there could be high AUC but also high misclassification error.
+
+### 2.1.3 Ranking Important Variables
+
+```{r, eval = T, fig.height=5}
+
+# Get column names from banks.train3_x
+col_names <- colnames(as.matrix(banks.train3_x))
+
+# Calculate variable importance
+imp <- xgb.importance(col_names, model = xgb1)
+
+# Plot variable importance
+xgb.plot.importance(importance_matrix = imp)
+```
+
+*Observations*:
+
+1.  Significant variables include:
+
+    ITEM 8236: Total Debt % Total Assets
+
+    ITEM 9104: Price/Earnings Ratio
+
+    ITEM 3998: Total Capital
+
+    ITEM 9304: Price/Book Value Ratio
+
+<!-- -->
+
+2.  Even though we are not using this model, it could be a good indicator that these variables are more effective at determining account manipulation if the significant variables match with those in other models in the future.
+
+### 2.1.4 Plotting ROC
+
+```{r,  eval = T, fig.height=5}
+
+# Convert labels to binary format (if needed)
+# Note: If your target variable is already in binary format, you can skip this step
+labels_train <- ifelse(banks.train3_y == 1, 1, 0)
+labels_test <- ifelse(banks.test3_y == 1, 1, 0)
+
+# Make predictions on the test data
+pred_test <- predict(xgb1, banks.test3_x, type = "response")
+
+# Create a data frame for test predictions and actual labels
+df_test <- data.frame(pred.xgb = pred_test, AAER = factor(labels_test, levels = c(0, 1)))
+
+# Make predictions on the training data
+pred_train <- predict(xgb1, banks.train3_x, type = "response")
+
+# Create a data frame for training predictions and actual labels
+df_train <- data.frame(pred.xgb = pred_train, AAER = factor(labels_train, levels = c(0, 1)))
+
+# Calculate AUC for both training and testing data
+auc_in_xgb <- df_train %>% roc_auc(AAER, pred.xgb, event_level='second') 
+auc_out_xgb <- df_test %>% roc_auc(AAER, pred.xgb, event_level='second') 
+curve_in_xgb <- df_train %>% roc_curve(AAER, pred.xgb, event_level='second') 
+curve_out_xgb <- df_test %>% roc_curve(AAER, pred.xgb, event_level='second')
+
+aucs_xgb <- c("In sample, XGBoost" = auc_in_xgb, "Out of sample, XGBoost" = auc_out_xgb)
+
+# Print AUC values
+print(paste("In-sample AUC:", auc_in_xgb)) 
+print(paste("Out-of-sample AUC:", auc_out_xgb))
+
+# Plot ROC curves
+ggplot() +
+geom_line(data=curve_out_xgb, aes(y=sensitivity, x=1-specificity, color="XGBoost out of sample")) +
+geom_line(data=curve_in_xgb, aes(y=sensitivity, x=1-specificity, color="XGBoost in sample")) +
+  geom_abline(slope=1)
+
+# Assuming aucs_xgb is a vector containing the XGBoost AUC value
+oos_aucs <- aucs_xgb
+
+# Assigning a name to the AUC value
+names(oos_aucs) <- "XGBoost"
+
+# Print the AUC value
+oos_aucs
+
+```
+
+*Observations*:
+
+Surprisingly, our test AUC is not too far off from our train AUC.
+
+In Sample AUC (Train) = 0.9850
+
+Out of Sample AUC (Test) = 0.9283
+
+### 2.1.5 Confusion Matrix
+
+```{r,  eval = F}
+
+# Evaluate Final Model
+pred.xgb1 <- predict(xgb1, banks.test3_x, type='response')
+confmat.xgb1 <- table(factor(ifelse(pred.xgb1>0.5,1,0)), banks.test3$AAER)
+
+confmat.xgb1
+
+# Get the Misclassification Error
+# fp+fn/(fp+fn+tp+tn)
+missclass.xgb <- 1 - (confmat.xgb1[2,2] + confmat.xgb1[1,1]) / (confmat.xgb1[2,2] + confmat.xgb1[1,1] + confmat.xgb1[1,2] + confmat.xgb1[2,1])
+
+# Get the sensitivity and precision
+sensitivity.xgb <- confmat.xgb1[2,2]/sum(confmat.xgb1[,2])
+
+# Get the precision
+precision.xgb <- confmat.xgb1[2,2]/sum(confmat.xgb1[2,])
+
+missclass.xgb 
+sensitivity.xgb
+precision.xgb
+
+```
+
+*Observations*:
+
+1.  Surprisingly, our total misclassification error is only 0.01173. However, this can be deceiving since there is an overwhelming number of AAER = "0" in our dataset.
+2.  Our sensitivity is under 0.4, which indicates that this model may not be good at classifying positives from negatives.
+3.  Our precision of >0.90 is too suspicious to accept as well.
+4.  Hence, we decided to explore logistic regression and lasso models.
+
+## 2.2 Logistic Regression
+
+1.  Initially, we ran 6 logistic regression models - removing a variable that was highly correlated to prevent multicollinearity
+
+2.  Thereafter, we used AIC to compare the models since AIC quantifies the trade-off between how well a model fits the data and how complex it is. The lower the AIC, the better the model is.
+
+3.  We realised that models 2 and 4 had an extremely close AIC of 1968.9 and 1968.2 respectively.
+
+### 2.2.1 Log Reg 1
+
+```{r}
+
+log.fit1 <- glm(AAER~. -year-ITEM3998, data=banks.train, family=binomial)
+summary(log.fit1) #AIC = 1975
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of default
+# Then get test accuracy
+
+predicted1 <- predict(log.fit1, banks.test, type="response")
+length(predicted1)
+confmat.test1 <- table(as.factor(ifelse(predicted1>0.5,1,0)),banks.test$AAER)
+confmat.test1 
+
+accuracy1 <- (confmat.test1[2,2] + confmat.test1[1,1]) / (confmat.test1[2,2] + confmat.test1[1,1] + confmat.test1[1,2] + confmat.test1[2,1])
+accuracy1
+
+# Test Accuracy: 98.02% 
+
+```
+
+### 2.2.2 Log Reg 2 - No Item 3255
+
+```{r}
+
+log.fit2 <- glm(AAER~. -year-ITEM3255, data=banks.train, family=binomial)
+summary(log.fit2) #AIC = 1968.9
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted2 <- predict(log.fit2, banks.test, type="response")
+confmat.test2 <- table(as.factor(ifelse(predicted2>0.5,1,0)),banks.test$AAER)
+confmat.test2 
+
+# Compute the test accuracy
+# TP+TN/(TP+TN+FP+FN)
+accuracy2 <- (confmat.test2[2,2] + confmat.test2[1,1]) / (confmat.test2[2,2] + confmat.test2[1,1] + confmat.test2[1,2] + confmat.test2[2,1])
+accuracy2
+
+# Test Accuracy: 98.00%
+
+```
+
+### 2.2.3 Log Reg 3 - No Item 8361
+
+```{r}
+
+log.fit3 <- glm(AAER~. -year-ITEM8361, data=banks.train, family=binomial)
+summary(log.fit3) #AIC = 1973.1
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted3 <- predict(log.fit3, banks.test, type="response")
+confmat.test3 <- table(as.factor(ifelse(predicted3>0.5,1,0)),banks.test$AAER)
+confmat.test3 
+
+accuracy3 <- (confmat.test3[2,2] + confmat.test3[1,1]) / (confmat.test3[2,2] + confmat.test3[1,1] + confmat.test3[1,2] + confmat.test3[2,1])
+accuracy3
+
+# Test Accuracy: 98.05%
+
+```
+
+### 2.2.4 Log Reg 4 - No Item 8301
+
+```{r}
+log.fit4 <- glm(AAER~. -year-ITEM8301, data=banks.train, family=binomial)
+summary(log.fit4) #AIC = 1968.2
+
+log.fit4$aic
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted4 <- predict(log.fit4, banks.test, type="response")
+confmat.test4 <- table(as.factor(ifelse(predicted4>0.5,1,0)),banks.test$AAER)
+confmat.test4 
+
+accuracy4 <- (confmat.test4[2,2] + confmat.test4[1,1]) / (confmat.test4[2,2] + confmat.test4[1,1] + confmat.test4[1,2] + confmat.test4[2,1])
+accuracy4
+
+# Test Accuracy: 98.00%
+
+```
+
+### 2.2.5 Log Reg 5 - No Item 18156
+
+```{r}
+
+log.fit5 <- glm(AAER~. -year-ITEM18156, data=banks.train, family=binomial)
+summary(log.fit5) #AIC = 1971.1
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted5 <- predict(log.fit5, banks.test, type="response")
+confmat.test5 <- table(as.factor(ifelse(predicted5>0.5,1,0)),banks.test$AAER)
+confmat.test5 
+
+accuracy5 <- (confmat.test5[2,2] + confmat.test5[1,1]) / (confmat.test5[2,2] + confmat.test5[1,1] + confmat.test5[1,2] + confmat.test5[2,1])
+accuracy5
+
+# Test Accuracy: 97.98%
+
+```
+
+### 2.2.6 Log Reg 6 - No Item 3995
+
+```{r}
+
+log.fit6 <- glm(AAER~. -year-ITEM3995, data=banks.train, family=binomial)
+summary(log.fit6) #AIC = 1972.6
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted6 <- predict(log.fit6, banks.test, type="response")
+confmat.test6 <- table(as.factor(ifelse(predicted6>0.5,1,0)),banks.test$AAER)
+confmat.test6 
+
+accuracy6 <- (confmat.test6[2,2] + confmat.test6[1,1]) / (confmat.test6[2,2] + confmat.test6[1,1] + confmat.test6[1,2] + confmat.test6[2,1])
+accuracy6
+
+# Test Accuracy: 98.00%
+
+```
+
+### 2.2.7 Measureables of the 6 Log Reg Models in a table for easier comparison
+
+```{r}
+
+aics <- data.frame("log_model" = c("log.fit1","log.fit2","log.fit3","log.fit4","log.fit5","log.fit6"),
+                   "AIC" = c(log.fit1$aic, log.fit2$aic, log.fit3$aic,log.fit4$aic,log.fit5$aic,log.fit6$aic),
+                   "Accuracy" = c(accuracy1,accuracy2,accuracy3,accuracy4,accuracy5,accuracy6))
+                   
+aics
+
+```
+
+*Observations*:
+
+1.  All the models have approximately the same classification accuracy of 98%.
+
+<!-- -->
+
+2.  We realised that models 2 and 4 have the lowest AIC that was extremely close at 1968.9 and 1968.2 respectively.
+
+3.  Therefore, we proceed to the next step for each model; removing a statistically insignificant variable with each iteration.
+
+4.  This gives us the following 5 new models.
+
+### 2.2.8 Log Reg 2.1
+
+```{r}
+
+# Continuation of Log Reg 2
+log.fit2.1 <- glm(AAER~. -year-ITEM7240-ITEM8301-ITEM8311-ITEM8316-ITEM8906-ITEM8361-ITEM15061-ITEM15073-ITEM18156-leverage_ratio-ITEM3995-ITEM2004, data=banks.train, family=binomial)
+summary(log.fit2.1) #AIC = 1976.3
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted2.1 <- predict(log.fit2.1, banks.test, type="response")
+confmat.test2.1 <- table(as.factor(ifelse(predicted2.1>0.5,"1","0")),banks.test$AAER)
+confmat.test2.1 
+
+accuracy <- (confmat.test2.1[2,2] + confmat.test2.1[1,1]) / (confmat.test2.1[2,2] + confmat.test2.1[1,1] + confmat.test2.1[1,2] + confmat.test2.1[2,1])
+accuracy
+
+# Test Accuracy: 98.03%
+
+```
+
+### 2.2.9 Log Reg 2.2
+
+```{r}
+
+# Continuation of Log Reg 2
+log.fit2.2 <- glm(AAER~. -year-ITEM7240-ITEM8301-ITEM8311-ITEM8316-ITEM8906-ITEM8361-ITEM15061-ITEM15073-ITEM18156-leverage_ratio-ITEM3995-ITEM2004-ITEM8381-ITEM3998-ITEM3255, data=banks.train, family=binomial)
+summary(log.fit2.2) #AIC = 1979.4
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted2.2 <- predict(log.fit2.2, banks.test, type="response")
+confmat.test2.2 <- table(as.factor(ifelse(predicted2.2>0.5,"1","0")),banks.test$AAER)
+confmat.test2.2
+
+accuracy <- (confmat.test2.2[2,2] + confmat.test2.2[1,1]) / (confmat.test2.2[2,2] + confmat.test2.2[1,1] + confmat.test2.2[1,2] + confmat.test2.2[2,1])
+accuracy
+ 
+# Test Accuracy:98.02%
+
+```
+
+### 2.2.10 Log Reg 4.1
+
+```{r}
+
+# Continuation of Log Reg 4
+log.fit4.1 <- glm(AAER~. -year-ITEM8301-ITEM8236-ITEM8231-ITEM8311-ITEM8316-ITEM8906-ITEM8361-ITEM15061-ITEM15073-ITEM15156-ITEM18156-leverage_ratio-net_profit_margin, data=banks.train, family=binomial)
+summary(log.fit4.1) #AIC = 1999.2
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted4.1 <- predict(log.fit4.1, banks.test, type="response")
+confmat.test4.1 <- table(as.factor(ifelse(predicted4.1>0.5,"1","0")),banks.test$AAER)
+confmat.test4.1 
+
+accuracy <- (confmat.test4.1[2,2] + confmat.test4.1[1,1]) / (confmat.test4.1[2,2] + confmat.test4.1[1,1] + confmat.test4.1[1,2] + confmat.test4.1[2,1])
+accuracy
+
+# Test Accuracy:97.95%
+
+```
+
+### 2.2.11 Log Reg 4.2
+
+```{r}
+
+# Continuation of Log Reg 4
+log.fit4.2 <- glm(AAER~. -year-ITEM3255-ITEM7240-ITEM3255-ITEM8381-ITEM8311-ITEM8316-ITEM8906-ITEM15061-ITEM15073-ITEM3995-ITEM2004-leverage_ratio, data=banks.train, family=binomial)
+summary(log.fit4.2) #AIC = 1972.0
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted4.2 <- predict(log.fit4.2, banks.test, type="response")
+confmat.test4.2 <- table(as.factor(ifelse(predicted4.2>0.5,"1","0")),banks.test$AAER)
+confmat.test4.2
+
+accuracy <- (confmat.test4.2[2,2] + confmat.test4.2[1,1]) / (confmat.test4.2[2,2] + confmat.test4.2[1,1] + confmat.test4.2[1,2] + confmat.test4.2[2,1])
+accuracy
+
+# Test Accuracy: 98.02% 
+
+```
+
+### 2.2.12 Log Reg 4.3
+
+```{r}
+
+# Continuation of Log Reg 4
+log.fit4.3 <- glm(AAER~. -year-ITEM3255-ITEM7240-ITEM3255-ITEM8381-ITEM8311-ITEM8316-ITEM8906-ITEM15061-ITEM15073-ITEM3995-ITEM2004-leverage_ratio-ITEM3998-ITEM8361-ITEM8301, data=banks.train, family=binomial)
+summary(log.fit4.3) #AIC = 1978.4
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predicted4.3 <- predict(log.fit4.3, banks.test, type="response")
+confmat.test4.3 <- table(as.factor(ifelse(predicted4.3>0.5,"1","0")),banks.test$AAER)
+confmat.test4.3
+
+accuracy <- (confmat.test4.3[2,2] + confmat.test4.3[1,1]) / (confmat.test4.3[2,2] + confmat.test4.3[1,1] + confmat.test4.3[1,2] + confmat.test4.3[2,1])
+accuracy
+
+# Test Accuracy: 98.02%
+
+```
+
+### 2.2.13 Comparing AUC of all models
+
+```{r}
+
+auc_log.fit4 <- auc(banks.test$AAER,predicted4,event_level='second')
+auc_log.fit4.1 <- auc(banks.test$AAER,predicted4.1,event_level='second')
+auc_log.fit4.2 <- auc(banks.test$AAER,predicted4.2,event_level='second')
+auc_log.fit4.3 <- auc(banks.test$AAER,predicted4.3,event_level='second')
+
+auc_log.fit2 <- auc(banks.test$AAER,predicted2,event_level='second')
+auc_log.fit2.1 <- auc(banks.test$AAER,predicted2.1,event_level='second')
+auc_log.fit2.2 <- auc(banks.test$AAER,predicted2.2,event_level='second')
+
+
+# Create a data frame to store results
+aucs <- data.frame("log_model" = c("log.fit4","log.fit4.1","log.fit4.2","log.fit4.3","log.fit2","log.fit2.1","log.fit2.2"),
+                   "AUC" = c(auc_log.fit4, auc_log.fit4.1, auc_log.fit4.2,auc_log.fit4.3,auc_log.fit2,auc_log.fit2.1,auc_log.fit2.2),
+                   "AIC" = c(log.fit4$aic, log.fit4.1$aic, log.fit4.2$aic, log.fit4.3$aic,log.fit2$aic,log.fit2.1$aic,log.fit2.2$aic))
+                   
+aucs
+
+```
+
+*Observations*:
+
+Model 4.2 has attained the highest AUC of 0.8541 and the third lowest AIC.
+
+### 2.2.14 Plotting AUC
+
+```{r,  eval = T, fig.height=5}
+
+banks1 <- banks.test
+banks1$predicted4 <- predicted4
+banks1$predicted4.1 <- predicted4.1
+banks1$predicted4.2 <- predicted4.2
+banks1$predicted4.3 <- predicted4.3
+banks1$predicted2 <- predicted2
+banks1$predicted2.1 <- predicted2.1
+banks1$predicted2.2 <- predicted2.2
+
+curve_4 <- banks1 %>% roc_curve(AAER,predicted4,event_level='second')
+curve_4.1 <- banks1 %>% roc_curve(AAER,predicted4.1,event_level='second')
+curve_4.2 <- banks1 %>% roc_curve(AAER,predicted4.2,event_level='second')
+curve_4.3 <- banks1 %>% roc_curve(AAER,predicted4.3,event_level='second')
+curve_2 <- banks1 %>% roc_curve(AAER,predicted2,event_level='second')
+curve_2.1 <- banks1 %>% roc_curve(AAER,predicted2.1,event_level='second')
+curve_2.2 <- banks1 %>% roc_curve(AAER,predicted2.2,event_level='second')
+
+ggplot() +
+  geom_line(data = curve_4, aes(y=sensitivity, x=1-specificity, color="logfit4")) +
+  geom_line(data = curve_4.1, aes(y=sensitivity, x=1-specificity, color="logfit4.1")) +
+  geom_line(data = curve_4.2, aes(y=sensitivity, x=1-specificity, color="logfit4.2")) +
+  geom_line(data = curve_4.3, aes(y=sensitivity, x=1-specificity, color="logfit4.3")) +
+  geom_line(data = curve_2, aes(y=sensitivity, x=1-specificity, color="logfit2")) +
+  geom_line(data = curve_2.1, aes(y=sensitivity, x=1-specificity, color="logfit2.1")) +
+  geom_line(data = curve_4.3, aes(y=sensitivity, x=1-specificity, color="logfit2.2")) +
+  geom_abline(slope=1)
+
+```
+
+*Observations*:
+
+1.  All the models have approximately the same classification accuracy of 98%.
+
+<!-- -->
+
+2.  Based on the results, logistic model `log.fit4.2` is the best because it has the highest AUC while having the third lowest AIC.
+
+3.  `log.fit4.2` results: AUC = 0.854133, AIC = 1972.023
+
+### 2.2.15 Log Reg 4.2 ON ALL DATA
+
+```{r}
+
+# Let's continue to remove statistically insignificant variables.
+log.fitall4.2 <- glm(AAER~. -year-ITEM3255-ITEM7240-ITEM3255-ITEM8381-ITEM8311-ITEM8316-ITEM8906-ITEM15061-ITEM15073-ITEM3995-ITEM2004-leverage_ratio, data=banks, family=binomial)
+summary(log.fitall4.2) #AIC = 2846
+
+# Plot a confusion matrix
+# Set the default cut off point to classify the default as 0.5
+# Use model to predict probability of AAER
+
+# Now get test accuracy
+predictedall4.2 <- predict(log.fitall4.2, banks, type="response")
+confmatall.test4.2 <- table(as.factor(ifelse(predictedall4.2>0.5,"1","0")),banks$AAER)
+confmatall.test4.2
+
+accuracy <- (confmat.test4.2[2,2] + confmat.test4.2[1,1]) / (confmat.test4.2[2,2] + confmat.test4.2[1,1] + confmatall.test4.2[1,2] + confmat.test4.2[2,1])
+accuracy
+
+# Test Accuracy: 94.50%  
+
+```
+
+*Observations*:
+
+Lastly, we have also tried logfit 4.2 on all data instead of just test data as logfit 4.2 gave us the highest AUC. We wanted to test if the AUC will increase for all banks data, however, we achieved a lower AUC as compared to logfit 4.2.
+
+
+## 2.3 Lasso
+
+### 2.3.1 CV.GLM Lasso based on Log Fit 4
+
+```{r,  eval = T, fig.height=5}
+
+# Since we are not using parsnip regression, we converted AAER back to numeric.
+# This is because factorised variables are not allowed in a matrix.
+
+set.seed(1234)
+banks2 <- banks %>%
+  mutate(AAER = as.numeric(AAER),
+         big4_auditor = as.numeric(big4_auditor))
+
+# Define new training and test sets
+train2 <- sample(1:nrow(banks2), 13531)
+test2 <- setdiff(1:nrow(banks2), train2)
+banks2.train <- banks2[train2,]
+banks2.test <- banks2[test2,]
+
+# Define the formula
+equation <- as.formula(paste("AAER~ITEM7240+ITEM8236+ITEM3255+ITEM3999+ITEM8231+ITEM8381+ITEM8311+ITEM8316+ITEM8906+ITEM8361+ITEM15025+ITEM15061+ITEM15073+ITEM15156+ITEM15173+ITEM9104+ITEM9304+ITEM3998+ITEM18156+ITEM3995+ITEM2004+ITEM3019+leverage_ratio+total_capital_adequacy_ratio+net_profit_margin+big4_auditor"))
+
+# Add to recipe
+rec2 <- recipe(equation,data=banks2.train) %>%
+  step_center(all_numeric_predictors()) %>% #center all prediction variables
+  step_scale(all_numeric_predictors()) %>% #scale all prediction variables to Z-score
+  step_intercept()
+
+str(banks2.train$big4_auditor)
+
+# Prep the data
+## We cannot use indicator variables in Lasso.
+
+prepped2 <- rec2 %>% prep(training=banks2.train)
+test_prepped2 <- rec2 %>% prep(training=banks2.test)
+
+train_x <- juice(prepped2,all_predictors(),composition="dgCMatrix") # Change to tibble or change the binary back to numeric
+train_y <- juice(prepped2,all_outcomes(),composition="matrix")
+test_x <- juice(test_prepped2,all_predictors(),composition="dgCMatrix")
+test_y <- juice(test_prepped2,all_outcomes(),composition="matrix")
+
+# Conduct cv
+cvfit <- cv.glmnet(x=train_x,y=train_y, family = 'binomial', alpha = 1, type.measure = 'auc')
+
+# Get the lambda that corresponds to min error
+# lambda.min refers to the value of the regularisation parameter (λ) that minimises the cross-validated error or some other criterion, typically chosen using techniques like cross-validation.
+cvfit$lambda.min 
+cvfit$lambda.1se
+
+plot(cvfit)
+
+# Plot the coefficient
+coefplot(cvfit, lambda = 'lambda.min', sort = 'magnitude', title = "coefplot with lambda.min") 
+coefplot(cvfit, lambda = 'lambda.1se', sort = 'magnitude', title = "coefplot with lambda.1se") 
+
+# Get the coefficients
+coef(cvfit)
+
+```
+
+
+*Observations*:
+
+Big4_auditor has the highest coefficient estimate, indicating it has a relatively strong influence on AAER which is the response variable 
+The Lasso model effectively performs variable selection by shrinking some coefficients to exactly zero, simplifying the model and reduces the risk of overfitting 
+
+
+### 2.3.2 Test the performance of the CV Lasso model
+
+```{r,  eval = T, fig.height=5}
+
+# Using lambda.min
+train.pred_lmin <- c(predict(cvfit, train_x, type = 'response', s = 'lambda.min'))
+test.pred_lmin <- c(predict(cvfit, test_x, type = 'response', s = 'lambda.min'))
+
+# Using lambda.1se
+train.pred_1se <- c(predict(cvfit, train_x, type = 'response', s = 'lambda.1se'))
+test.pred_1se <- c(predict(cvfit, test_x, type = 'response', s = 'lambda.1se'))
+
+# Create 2 data frames to store the predicted y values for train and test set as well as the actual AAER
+
+# For lambda.min
+df_train_lmin <- data.frame(train.pred_lmin=train.pred_lmin, AAER=factor(banks2.train$AAER))
+df_test_lmin <- data.frame(test.pred_lmin=test.pred_lmin, AAER=factor(banks2.test$AAER))
+
+# For lambda.1se
+df_train_1se <- data.frame(train.pred_1se=train.pred_1se, AAER=factor(banks2.train$AAER))
+df_test_1se <- data.frame(test.pred_1se=test.pred_1se, AAER=factor(banks2.test$AAER))
+
+# For lambda.min
+auc_cv_lmin_train <- df_train_lmin %>% roc_auc(AAER, train.pred_lmin, event_level='second')
+auc_cv_lmin_test <- df_test_lmin %>% roc_auc(AAER, test.pred_lmin, event_level='second')
+curve_CV.min_train <- df_train_lmin %>% roc_curve(AAER, train.pred_lmin, event_level='second')
+curve_CV.min_test <- df_test_lmin %>% roc_curve(AAER, test.pred_lmin, event_level='second')
+
+# For lambda.1se
+auc_cv_1se_train <- df_train_1se %>% roc_auc(AAER, train.pred_1se, event_level='second')
+auc_cv_1se_test <- df_test_1se %>% roc_auc(AAER, test.pred_1se, event_level='second')
+curve_CV.1se_train <- df_train_1se %>% roc_curve(AAER, train.pred_1se, event_level='second')
+curve_CV.1se_test <- df_test_1se %>% roc_curve(AAER, test.pred_1se, event_level='second')
+
+# Store results in data frame
+aucs_CV  <- data.frame("AUC" = c(auc_cv_lmin_train$.estimate, auc_cv_lmin_test$.estimate, auc_cv_1se_train$.estimate, auc_cv_1se_test$.estimate),
+                       "model" = c("In sample, lambda.min","out sample, lambda.min","In sample, lambda.1se","out sample, lambda.1se"))
+              
+aucs_CV
+
+# Plot the AUC
+ggplot() +
+  geom_line(data = curve_CV.min_train, aes(y=sensitivity,x=1-specificity, color = "In sample, lambda.min")) +
+  geom_line(data = curve_CV.min_test, aes(y=sensitivity,x=1-specificity, color = "out sample, lambda.min")) +
+  geom_line(data = curve_CV.1se_train, aes(y=sensitivity,x=1-specificity, color = "In sample, lambda.1se")) +
+  geom_line(data = curve_CV.1se_test, aes(y=sensitivity,x=1-specificity, color = "out sample, lambda.1se")) +
+  geom_abline(slope=1)
+
+```
+
+*Observations*:
+
+In sample, lambda.min = 0.8130
+
+Out of sample, lambda.min = 0.8154
+
+In sample, lambda.1se = 0.7903
+
+Out of sample, lambda.1se = 0.8083
+
+1.  In sample (training data): Lambda.min offers the highest performance with the least amount of complexity at 0.8130. Lambda.1se is 0.7903, a slightly reduced lambda value that produces a simpler model but yet produces good performance.
+
+2.  Out of Sample (testing data): When applied to unknown data, the ideal regularisation strength may differ, as evidenced by lambda.min, which is 0.8154 and shows a little larger lambda value than in the sample.The lambda value is marginally higher than in the sample, but it is still within one standard error of the lowest cross-validation error, as shown by Lambda.1se of 0.8083, which similarly indicates a similar pattern.
+
+# 3.0 Conclusion
+
+Overall, we have looked into the performance of various predictive models on our data set - XGBoost, Logistic Regression, and Lasso.
+
+We started off with the implementation of the XGBoost model. However, it showed signs of over-fitting. Despite achieving an impressive train AUC of 0.9850 and a test AUC of 0.9283, we recognized the need to address this issue to ensure the model's generalizability and the presence of the the imbalanced data problem.Therefore, we turned to logistic regression.
+
+Leveraging insights from a correlation matrix, we meticulously pruned non-significant variables, refining our models to achieve optimal performance. Notably, Logistic Regression Models 2 and 4 emerged as front-runners as previously mentioned, exhibiting similar AIC values so we performed the same variable elimination processes on them to come up with our Log Fit Models.
+
+Lastly, building upon the foundations laid by logistic regression model 4, we tried Lasso regression. The resulting model delivered promising results, with an in sample (lambda.min) of 0.8130, out of sample (lambda.min) of 0.8154, in sample (lambda.1se) of 0.7903 and out of sample (lambda.1se) of 0.8083.
+
+Ultimately, our choice of model would be the Log Fit 4.2 regression model because it has attained the highest AUC among the other models and it also has one of the lowest AIC. This means out of all the models we have built and tested, this particular one has the best predictive ability to detect fraud.

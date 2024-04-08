@@ -1,0 +1,247 @@
+---
+title: "item_joining"
+output: html_document
+date: "2024-03-14"
+---
+
+```{r}
+library(tidyverse)
+#load the banks dataset with aaer
+banks <- readRDS('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/data/banks_final_aaer.rds')
+
+#load the cap_deposit ratios
+cap_deposits <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/cap_deposit_ratio.csv')
+
+#load the non performing loans ratio
+npl_ratio <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/non_performing_loans_ratio.csv')
+
+#reserves for loan losses(out of total loans) ratio
+rfll <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/reserves_for_loan_losses.csv')
+ 
+#reserves for loan losses(out of total assets) ratio
+rfll2 <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/reserves_for_loan_losses(total assets).csv')
+ 
+#earning assets/total funds
+eatf <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/earning_assets_total_funds.csv')
+
+#total capital
+total_capital <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/total_capital.csv')
+
+#risk_weighted_assets
+risk_weighted_assets <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/risk_weighted_assets.csv')
+
+#cash and securities out of total deposits
+cstd <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/cash&securities_deposits.csv')
+
+price_earnings_ratio <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/price_earnings_ratio.csv')
+
+price_book_value_ratio <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/price_book_value_ratio.csv')
+
+shareholder_equity <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/shareholder_equity.csv')
+
+total_cash <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/cash.csv')
+ 
+#total deposits
+total_deposits <- read.csv('C:/Users/Ryan Goh/Desktop/ACCT420PROJ/items/deposits.csv')
+
+```
+
+##Left join on code and year
+
+```{r cars}
+cap_deposits <- cap_deposits %>%
+   rename(year = year_, ITEM15025 = value_) %>%
+   select(year,code,ITEM15025)
+ 
+npl_ratio <- npl_ratio %>%
+    rename(year = year_, ITEM15061 = value_) %>%
+    select(year,code,ITEM15061)
+
+rfll <- rfll %>%
+    rename(year = year_, ITEM15073 = value_) %>%
+    select(year,code,ITEM15073)
+ 
+rfll2 <- rfll2 %>%
+   rename(year = year_, ITEM15156 = value_) %>%
+   select(year,code,ITEM15156)
+ 
+eatf <- eatf %>%
+   rename(year = year_, ITEM15173 = value_) %>%
+   select(year,code,ITEM15173)
+
+total_capital <- total_capital %>%
+   rename(year = year_, ITEM3998 = value_) %>%
+   select(year,code,ITEM3998)
+ 
+risk_weighted_assets <- risk_weighted_assets %>%
+   rename(year = year_, ITEM18156 = value_) %>%
+   select(year,code,ITEM18156)
+ 
+cstd <- cstd %>%
+   rename(year = year_, ITEM15013 = value_) %>%
+   select(year,code,ITEM15013)
+
+price_earnings_ratio <- price_earnings_ratio %>%
+   rename(year = year_, ITEM9104 = value_) %>%
+   select(year,code,ITEM9104)
+ 
+price_book_value_ratio <- price_book_value_ratio %>%
+   rename(year = year_, ITEM9304 = value_) %>%
+   select(year,code,ITEM9304)
+ 
+shareholder_equity <- shareholder_equity %>%
+   rename(year = year_, ITEM3995 = value_) %>%
+   select(year,code,ITEM3995)
+ 
+total_cash <- total_cash %>%
+   rename(year = year_, ITEM2004 = value_) %>%
+   select(year,code,ITEM2004)
+
+ 
+total_deposits <- total_deposits %>%
+   rename(year = year_, ITEM3019 = value_) %>%
+   select(year,code,ITEM3019)
+
+
+  
+
+banks <- left_join(banks,cap_deposits, by=c('year','code'))
+banks <- left_join(banks,npl_ratio, by=c('year','code'))
+banks <- left_join(banks,rfll, by=c('year','code'))
+banks <- left_join(banks,rfll2, by=c('year','code'))
+banks <- left_join(banks,eatf, by=c('year','code'))
+banks <- left_join(banks,total_capital, by=c('year','code'))
+banks <- left_join(banks,risk_weighted_assets, by=c('year','code'))
+banks <- left_join(banks,cstd, by=c('year','code'))
+banks <- left_join(banks,price_earnings_ratio, by=c('year','code'))
+banks <- left_join(banks,price_book_value_ratio, by=c('year','code'))
+banks <- left_join(banks,shareholder_equity, by=c('year','code'))
+banks <- left_join(banks,total_cash, by=c('year','code'))
+banks <- left_join(banks,total_deposits, by=c('year','code'))
+banks
+```
+#replace ITEM7546 NA values with 1(not audited)
+```{r}
+banks$ITEM7546[is.na(banks$ITEM7546)] <- 1
+
+```
+
+## select the fields we want
+
+```{r}
+ banks <- banks %>%
+   select(year,code,ITEM6001,ITEM6010,ITEM7240,ITEM19109,ITEM19110,ITEM19111,ITEM19112,ITEM8236,ITEM8301,ITEM3255,ITEM3999,ITEM8236,ITEM8231,ITEM8236,ITEM8381,ITEM8311,ITEM8316,ITEM8906,ITEM8361,ITEM15025,ITEM15061,ITEM15073,ITEM15156,ITEM15173,ITEM7800,ITEM7546,ITEM9104,ITEM9304,ITEM3998,ITEM18156,ITEM3995,ITEM2004,ITEM3019,ITEM7546,AAER)%>%
+      #create some ratios based on the raw data
+   mutate(leverage_ratio = round((ITEM3255/ITEM3995), 3),
+          total_capital_adequacy_ratio = round((ITEM18156/ITEM3998), 3),
+          cash_to_deposits_ratio = round((ITEM2004/ITEM3019), 3),
+          #change some variables to character
+          code = as.character(code),
+          ITEM7546 = factor(ITEM7546),
+          ITEM6010 = as.character(ITEM6010),
+          ITEM3999 = as.numeric(ITEM3999))%>%
+   arrange(code,year) 
+
+
+banks
+```
+
+
+
+#create a loop to get the grouped avergae of each company by column
+```{r}
+library(rlang)
+#get names of all numeric columns
+numeric_columns <- names(banks)[sapply(banks, is.numeric)][-1]
+
+# Iterate over numeric columns to create group averages
+for (col_name in numeric_columns) {
+  col_symbol <- rlang::sym(col_name) # Convert string to symbol, 
+  #this will allow us to add custom naming to dplyr functions
+  
+  banks <- banks %>%
+    group_by(code) %>%
+    mutate(!!paste0(col_name, "_grp_avg") := mean(!!col_symbol, na.rm = TRUE)) %>%
+    ungroup() # Make sure to ungroup after mutating
+}
+
+```
+
+
+#REPLACE ALL NA in ITEM7546 WITH 1
+#replace na values with grp averages
+```{r}
+banks$ITEM19109[is.na(banks$ITEM19109)] <- banks$ITEM19109_grp_avg
+banks$ITEM19110[is.na(banks$ITEM19110)] <- banks$ITEM19110_grp_avg
+banks$ITEM19111[is.na(banks$ITEM19111)] <- banks$ITEM19111_grp_avg
+banks$ITEM19112[is.na(banks$ITEM19112)] <- banks$ITEM19112_grp_avg
+banks$ITEM7240[is.na(banks$ITEM7240)] <- banks$ITEM7240_grp_avg
+banks$ITEM8236[is.na(banks$ITEM8236)] <- banks$ITEM8236_grp_avg
+banks$ITEM8301[is.na(banks$ITEM8301)] <- banks$ITEM8301_grp_avg
+banks$ITEM3255[is.na(banks$ITEM3255)] <- banks$ITEM3255_grp_avg
+banks$ITEM3999[is.na(banks$ITEM3999)] <- banks$ITEM3999_grp_avg
+banks$ITEM8231[is.na(banks$ITEM8231)] <- banks$ITEM8231_grp_avg
+banks$ITEM8381[is.na(banks$ITEM8381)] <- banks$ITEM8381_grp_avg
+banks$ITEM8311[is.na(banks$ITEM8311)] <- banks$ITEM8311_grp_avg
+banks$ITEM8316[is.na(banks$ITEM8316)] <- banks$ITEM8316_grp_avg
+banks$ITEM8906[is.na(banks$ITEM8906)] <- banks$ITEM8906_grp_avg
+banks$ITEM8361[is.na(banks$ITEM8361)] <- banks$ITEM8361_grp_avg
+banks$ITEM15025[is.na(banks$ITEM15025)] <- banks$ITEM15025_grp_avg
+banks$ITEM15061[is.na(banks$ITEM15061)] <- banks$ITEM15061_grp_avg
+banks$ITEM15073[is.na(banks$ITEM15073)] <- banks$ITEM15073_grp_avg
+banks$ITEM15156[is.na(banks$ITEM15156)] <- banks$ITEM15156_grp_avg
+banks$ITEM15173[is.na(banks$ITEM15173)] <- banks$ITEM15173_grp_avg
+banks$ITEM9104[is.na(banks$ITEM9104)] <- banks$ITEM9104_grp_avg
+banks$ITEM9304[is.na(banks$ITEM9304)] <- banks$ITEM9304_grp_avg
+banks$ITEM3998[is.na(banks$ITEM3998)] <- banks$ITEM3998_grp_avg
+banks$ITEM18156[is.na(banks$ITEM18156)] <- banks$ITEM18156_grp_avg
+banks$ITEM3995[is.na(banks$ITEM3995)] <- banks$ITEM3995_grp_avg
+banks$ITEM2004[is.na(banks$ITEM2004)] <- banks$ITEM2004_grp_avg
+banks$ITEM3019[is.na(banks$ITEM3019)] <- banks$ITEM3019_grp_avg
+banks$leverage_ratio[is.na(banks$leverage_ratio)] <- banks$leverage_ratio_grp_avg
+banks$total_capital_adequacy_ratio[is.na(banks$total_capital_adequacy_ratio)] <- banks$total_capital_adequacy_ratio_grp_avg
+banks$cash_to_deposits_ratio[is.na(banks$cash_to_deposits_ratio)] <- banks$cash_to_deposits_ratio_grp_avg
+```
+
+
+#replace remaining NAN with the ABSOLUTE MEAN OF column
+#the reason why there are still na values is because for some companies, they completely do not have the value for all years
+```{r}
+#looks like we still have nan values, this could be due to the company's column data not being present at all
+#we will replace nan values with the absolute column average
+#numeric columns
+names <- names(banks)[sapply(banks,is.numeric)][-1]
+
+for(col in names){
+    col_mean <- mean(banks[[col]], na.rm = TRUE)
+    banks[[col]][is.nan(banks[[col]])] <- col_mean
+    
+  
+}
+
+```
+
+#create a new variable called 'big4_auditor'
+# 1 if big 4 company conducted the audit, o otherwise
+```{r}
+#first define the list of big 4 firms
+big4 <- c('PriceWaterhouseCoopers','Deloitte Touche Tohmatsu','Deloitte & Touche','Ernst & Young','KPMG')
+banks <- banks %>%
+  mutate(big4_auditor = factor(ifelse(ITEM7800 %in% big4, 1, 0 ))) %>%
+  select(year,code,ITEM6001,ITEM6010,ITEM7240,ITEM19109,ITEM19110,ITEM19111,ITEM19112,ITEM8236,ITEM8301,ITEM3255,ITEM3999,ITEM8236,ITEM8231,ITEM8236,ITEM8381,ITEM8311,ITEM8316,ITEM8906,ITEM8361,ITEM15025,ITEM15061,ITEM15073,ITEM15156,ITEM15173,ITEM7546,ITEM9104,ITEM9304,ITEM3998,ITEM18156,ITEM3995,ITEM2004,ITEM3019,ITEM7546,big4_auditor,leverage_ratio,total_capital_adequacy_ratio,cash_to_deposits_ratio,AAER)
+           
+  
+```
+
+#replace infinite values with  the absolute mean
+```{R}
+banks[['cash_to_deposits_ratio']][is.infinite(banks[['cash_to_deposits_ratio']])] <- mean(banks[['cash_to_deposits_ratio']], na.rm = TRUE)
+banks
+```
+
+```{r}
+#save as rds
+saveRDS(banks, file = "banks_cleaned_with_AAER.rds")
+
+
+```
